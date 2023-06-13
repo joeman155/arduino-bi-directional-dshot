@@ -15,19 +15,16 @@ const int DEBOUNCE_DELAY = 50;   // the debounce time; increase if the output fl
 const int programPin = 6;
 const int abortPin=3;
 int programState = LOW;
-int abortState   = LOW;
 unsigned long plastDebounceTime = 0;  // the last time the output pin was toggled
 int plastSteadyState = LOW;
 int plastFlickerableState = LOW;  // the previous flickerable state from the input pin
-unsigned long alastDebounceTime = 0;  // the last time the output pin was toggled
-int alastSteadyState = LOW;
-int alastFlickerableState = LOW;  // the previous flickerable state from the input pin
 int abortAction = 0;
 
 unsigned long programDelay=5000;
 unsigned long last_time;
 
-uint16_t targetRPM = 0;   // Target RPM.
+uint16_t targetRPM = 0;     // Target RPM.
+uint16_t prevtargetRPM = 0; // Previous target value
 
 
 /**
@@ -200,7 +197,7 @@ void sendDshot300Frame();
 void sendDshot300Bit(uint8_t bit);
 void sendInvertedDshot300Bit(uint8_t bit);
 void processTelemetryResponse();
-void readUpdate();
+void speedUpdate(uint16_t targetRPM, int verbose);
 void printResponse();
 void setupUserInterface();
 void loopUserInterface();
@@ -211,6 +208,7 @@ void INT0_ISR(void)
 {
   abortAction=1;
   targetRPM = 0;
+  speedUpdate(targetRPM, 0);
   program = 0;
 }
 
@@ -322,17 +320,13 @@ void sendDshot300Frame() {
 void sendInvertedDshot300Bit(uint8_t bit) {
   if(bit) {
     DSHOT_PORT = DPORT_LOW;
-    //DELAY_CYCLES(40);
     DELAY_CYCLES(37);
     DSHOT_PORT = DPORT_HIGH;
-    //DELAY_CYCLES(13);
     DELAY_CYCLES(7);
   } else {
     DSHOT_PORT = DPORT_LOW;
-    //DELAY_CYCLES(20);
     DELAY_CYCLES(16);
     DSHOT_PORT = DPORT_HIGH;
-    //DELAY_CYCLES(33);
     DELAY_CYCLES(25);
   }
 }
@@ -340,17 +334,13 @@ void sendInvertedDshot300Bit(uint8_t bit) {
 void sendDshot300Bit(uint8_t bit) {
   if(bit) {
     DSHOT_PORT = DPORT_HIGH;
-    //DELAY_CYCLES(40);
     DELAY_CYCLES(37);
     DSHOT_PORT = DPORT_LOW;
-    //DELAY_CYCLES(13);
     DELAY_CYCLES(7);
   } else {
     DSHOT_PORT = DPORT_HIGH;
-    //DELAY_CYCLES(20);
     DELAY_CYCLES(16);
     DSHOT_PORT = DPORT_LOW;
-    //DELAY_CYCLES(33);
     DELAY_CYCLES(25);
   }
 }
@@ -441,38 +431,37 @@ void dshotSetup() {
   setupTimer();
 }
 
-void readUpdate() {
-  // Serial read might not always trigger properly here since the timer might interrupt
-  // Disabling the interrupts is not an option since Serial uses interrupts too.
-  if(Serial.available() > 0) {
-    String c = Serial.readString();
-    uint16_t dshotValue = c.toInt(); // Serial.parseInt(SKIP_NONE);
+void speedUpdate(uint16_t targetRPM, int verbose) {
+  uint16_t dshotValue;
 
-    if(dshotValue > 2047) {
-      dshotValue = 2047;
+  // Only if target RPM has changed, do we process it and generate a new frame.
+  if (prevtargetRPM != targetRPM)  {
+      prevtargetRPM = targetRPM;
+
+     if (targetRPM != 0) {
+        dshotValue = map(targetRPM, 230, 50000, 100, 2000);
+     } else  {
+        dshotValue = 0;
+     }
+
+    if(dshotValue > 2000) {
+      dshotValue = 2000;
     }
     frame = dshot.buildFrame(dshotValue, 0);
 
-    if(dshotValue == 13) {
-      /**
-       * Lazy solution: Technically this command should be sent exactly six times
-       * to enable EDT. But sending it at least 6 times does not have any side
-       * effect, so we just send it until a proper throttle value is provided.
-       */
-      frame = dshot.buildFrame(13, 1);
+    if (verbose == 1) {
+       Serial.print("> Frame: ");
+       Serial.print(frame, BIN);
+       Serial.print(" Value: ");
+       Serial.println(dshotValue);
     }
-
-    Serial.print("> Frame: ");
-    Serial.print(frame, BIN);
-    Serial.print(" Value: ");
-    Serial.println(dshotValue);
   }
 }
 
+
+
+
 void printResponse() {
-
-
-
   if(newResponse) {
     newResponse  = false;
 
@@ -607,7 +596,6 @@ void printResponse() {
 }
 
 void dshotLoop() {
-  readUpdate();
   printResponse();
 }
 
@@ -643,7 +631,6 @@ void setupUserInterface() {
   attachInterrupt(digitalPinToInterrupt(abortPin), INT0_ISR, RISING);
 
   plastDebounceTime = millis();
-  alastDebounceTime = millis();
 }
 
 
@@ -685,74 +672,64 @@ if (program > 0) {
    if (millis() - last_time > programDelay) {
       if (program == 1) {
         abortAction = 0;
-        run_program(48,0);
-
+        run_program(250, 0);
         program = 0;
-
       }
 
       if (program == 2) {
         abortAction = 0;
-        run_program(96,0);
-
+        run_program(5000, 0);
         program = 0;
-
       }    
 
       if (program == 3) {
         abortAction = 0;
-        run_program(144,0);
-
+        run_program(10000, 0);
         program = 0;
-
       } 
+
       if (program == 4) {
         abortAction = 0;
-        run_program(192,10);
-
+        run_program(192, 10);
         program = 0;
-
       } 
+
       if (program == 5) {
         abortAction = 0;
-        run_program(240,10);
-
+        run_program(240, 10);
         program = 0;
+      }  
 
-      }   
       if (program == 6) {
         abortAction = 0;
-        run_program(288,10);
-
+        run_program(288, 10);
         program = 0;
-
       }    
+
       if (program == 7) {
         abortAction = 0;
-        run_program(336,10);
-
+        run_program(336, 10);
         program = 0;
-
       }    
+
       if (program == 8) {
         abortAction = 0;
-        run_program(384,10);
+        run_program(384, 10);
         program = 0;
-
       }        
 
       if (program == 9) {
         abortAction = 0;
-        run_program(432,10);
-
+        run_program(432, 10);
         program = 0;
-      }        
+      } 
+
       if (program == 10) {
         abortAction = 0;
-        run_program(480,10);
-
+        run_program(480, 10);
         program = 0;
-      }                                                                 
+      }  
+
    }
 
 }
@@ -771,11 +748,12 @@ void run_program(uint16_t maxrpm, int run_seconds)
 
 
   Serial.println("Starting ramp up...");
-  for (i = 0; i < maxrpm; i++) {
+  for (i = 230; i < maxrpm; i++) {
      delay(10);
-     // pwmval = bottom_pwmval+i;
-     // myservo.writeMicroseconds(pwmval);
+     targetRPM = i;
+     speedUpdate(targetRPM, 0);
 
+     printResponse();
      if (abortAction == 1) {
         abortAction = 0;
         Serial.println("Aborting...");
@@ -791,7 +769,8 @@ void run_program(uint16_t maxrpm, int run_seconds)
 
      current_second = int((millis() - start_timer) / 1000);
      previous_second = current_second;
-    
+     printResponse();
+
     if (abortAction == 1) {
        abortAction = 0;
        Serial.println("Aborting...");
@@ -801,12 +780,9 @@ void run_program(uint16_t maxrpm, int run_seconds)
   }
 
   // Set Speed back to OFF
-
-/*
-   pwmval = bottom_pwmval;
-   myservo.writeMicroseconds(pwmval);
-   Serial.println(pwmval);
-*/
+  targetRPM = 0;
+  speedUpdate(targetRPM, 0);
+  printResponse();
 
 }
 
