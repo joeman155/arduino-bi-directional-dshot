@@ -30,9 +30,29 @@ const FREQUENCY frequency = F500;
 // Enable Extended Dshot Telemetry
 bool enableEdt = false;
 
-// DSHOT Output pin
-const uint8_t pinDshot = 48;
-// const uint8_t pinTele = 19;
+
+
+#if defined(__AVR_ATmega2560__)
+// For MEga Ether 2560, PortA 0-7: i.e. D22-D29
+#define DSHOT_PORT PORTL
+#define DSHOT_PIN 48
+#define DPORT_LOW 0
+#define DPORT_HIGH 2
+#endif
+
+
+#if defined(__AVR_ATmega328P__)
+// For UNO, PortD 0-7: i.e. D0-D7
+#define DSHOT_PORT PORTB
+#define DSHOT_PIN 8
+#define DPORT_LOW 0
+#define DPORT_HIGH 2
+#endif
+
+// DSHOT Output and Input pin
+const uint8_t pinDshot = DSHOT_PIN;
+
+
 
 /**
  * If debug mode is enabled, more information is printed to the serial console:
@@ -136,8 +156,8 @@ volatile uint8_t edtState = 0;
 
 uint32_t lastPeriodTime = 0;
 
-  uint32_t RPM;
-  uint32_t oldRPM;
+uint32_t RPM;
+uint32_t oldRPM;   // Used to store old RPM, which is used to reduce printing of RPM (we don't print RPM if it hasn't changed since last time)
 
 #define DELAY_CYCLES(n) __builtin_avr_delay_cycles(n)
 
@@ -253,17 +273,17 @@ void sendDshot300Frame() {
  */
 void sendInvertedDshot300Bit(uint8_t bit) {
   if(bit) {
-    PORTL = B00000000;
+    DSHOT_PORT = DPORT_LOW;
     //DELAY_CYCLES(40);
     DELAY_CYCLES(37);
-    PORTL = B00000010;
+    DSHOT_PORT = DPORT_HIGH;
     //DELAY_CYCLES(13);
     DELAY_CYCLES(7);
   } else {
-    PORTL = B00000000;
+    DSHOT_PORT = DPORT_LOW;
     //DELAY_CYCLES(20);
     DELAY_CYCLES(16);
-    PORTL = B00000010;
+    DSHOT_PORT = DPORT_HIGH;
     //DELAY_CYCLES(33);
     DELAY_CYCLES(25);
   }
@@ -271,17 +291,17 @@ void sendInvertedDshot300Bit(uint8_t bit) {
 
 void sendDshot300Bit(uint8_t bit) {
   if(bit) {
-    PORTL = B00000010;
+    DSHOT_PORT = DPORT_HIGH;
     //DELAY_CYCLES(40);
     DELAY_CYCLES(37);
-    PORTL = B00000000;
+    DSHOT_PORT = DPORT_LOW;
     //DELAY_CYCLES(13);
     DELAY_CYCLES(7);
   } else {
-    PORTL = B00000010;
+    DSHOT_PORT = DPORT_HIGH;
     //DELAY_CYCLES(20);
     DELAY_CYCLES(16);
-    PORTL = B00000000;
+    DSHOT_PORT = DPORT_LOW;
     //DELAY_CYCLES(33);
     DELAY_CYCLES(25);
   }
@@ -350,9 +370,9 @@ void dshotSetup() {
 
   // Set the default signal Level
   #if inverted
-    PORTL = B00000010;
+    DSHOT_PORT = DPORT_HIGH;
   #else
-    PORTL = B00000000;
+    DSHOT_PORT = DPORT_LOW;
   #endif
 
   #if debug
@@ -378,11 +398,7 @@ void readUpdate() {
   // Disabling the interrupts is not an option since Serial uses interrupts too.
   if(Serial.available() > 0) {
     String c = Serial.readString();
-    // Serial.println(c);
     uint16_t dshotValue = c.toInt(); // Serial.parseInt(SKIP_NONE);
-   // Serial.read();
-   // Serial.print("Read: ");
-   // Serial.println(dshotValue);
 
     if(dshotValue > 2047) {
       dshotValue = 2047;
@@ -416,11 +432,6 @@ void printResponse() {
     uint8_t crc = mapped & 0x0F;
     uint16_t value = mapped >> 4;
     uint8_t crcExpected = dshot.calculateCrc(value);
-
- //   Serial.println(mapped, BIN);
-//    Serial.print(value, BIN);
-//    Serial.print(" ");
-//    Serial.println(crc, BIN);
 
     // Wait for a first valid response
     if(!hasEsc) {
@@ -456,10 +467,10 @@ void printResponse() {
 
       uint8_t packageType = value >> 8 & 0b00001111;
 
-    if (oldRPM != RPM) {
-      Serial.print("RPM:" );
-      Serial.println(RPM); 
-    }
+      if (oldRPM != RPM) {
+         Serial.print("RPM:" );
+         Serial.println(RPM); 
+      }
       oldRPM = RPM;
 
 
@@ -507,58 +518,6 @@ void printResponse() {
         float successPercent = (successPackets * 1.0 / receivedPackets * 1.0) * 100;
       #endif
 
-/*
-      uint16_t speed = -1;
-      uint16_t speedBase;
-      if (crc == crcExpected) {
-          if (packageType & 0x01 == 0 and periodShift == 0) {
-             int speed = periodBase;   
-             Serial.println("1111");         
-             } else if (packageType & 0x01 == 1 and periodShift > 0) {
-
-               Serial.println("2222");
-                  speed = periodBase;
-
-                       Serial.print("start speed: ");
-                       Serial.print(speed);    
-                       Serial.print('\t');     
-                       Serial.println(periodShift);             
-                  while (1) {
-                     if (periodShift ==0) {
-                         Serial.println("breaking late");
-                         break;
-                     } 
-                     
-                     if (periodShift & 0x01 == 1) {
-
-                       break;
-                     }  else {
-                       periodShift--;
-                       speed = speed << 1;
-                     }                     
-                  }
-             }
-              
-
-          if (speed > 0) {
-            Serial.print("FINAL Speed: ");
-            Serial.print(speed);
-                       Serial.print('\t');     
-                       Serial.println(periodShift);                
-          } 
-
-          Serial.print(periodBase);
-          Serial.print('\t');
-          Serial.print(periodShift);
-          Serial.print('\t');         
-          Serial.println(periodTime);
-
-
-      }
-
-*/
-
-      // Serial.print(periodTime);
       #if debug
         Serial.print("us ");
         Serial.print(round(successPercent));
