@@ -28,10 +28,11 @@ const FREQUENCY frequency = F500;
 #define inverted true
 
 // Enable Extended Dshot Telemetry
-bool enableEdt = true;
+bool enableEdt = false;
 
 // DSHOT Output pin
-const uint8_t pinDshot = 8;
+const uint8_t pinDshot = 48;
+// const uint8_t pinTele = 19;
 
 /**
  * If debug mode is enabled, more information is printed to the serial console:
@@ -48,7 +49,7 @@ const uint8_t pinDshot = 8;
  * OK: 13696us 96.43%
  * OK: 22400us 96.44%
  */
-#define debug true
+#define debug false
 
 // If this pin is pulled low, then the device starts in C2 interface mode
 #define C2_ENABLE_PIN 13
@@ -135,6 +136,9 @@ volatile uint8_t edtState = 0;
 
 uint32_t lastPeriodTime = 0;
 
+  uint32_t RPM;
+  uint32_t oldRPM;
+
 #define DELAY_CYCLES(n) __builtin_avr_delay_cycles(n)
 
 void sendDshot300Frame();
@@ -151,36 +155,36 @@ void processTelemetryResponse() {
   // Delay around 26us
   DELAY_CYCLES(410);
 
-  register uint8_t ices1High = 0b01000000;
+  register uint8_t ices5High = 0b01000000;
   register uint16_t prevVal = 0;
   register uint8_t tifr;
   register uint16_t *pCapDat;
 
-  TCCR1A = 0b00000001; // Toggle OC1A on compare match
-  TCCR1B = 0b00000010; // trigger on falling edge, prescaler 8, filter off
+  TCCR5A = 0b00000001; // Toggle OC1A on compare match
+  TCCR5B = 0b00000010; // trigger on falling edge, prescaler 8, filter off
 
   // Limit to 70us - that should be enough to fetch the whole response
   // at 2MHz - scale factor 8 - 150 ticks seems to be a sweetspot.
-  OCR1A = 150;
-  TCNT1 = 0x00;
+  OCR5A = 150;
+  TCNT5 = 0x00;
 
-  TIFR1 = (1 << ICF1) | (1 << OCF1A) | (1 << TOV1); // clear all timer flags
+  TIFR5 = (1 << ICF5) | (1 << OCF5A) | (1 << TOV5); // clear all timer flags
   for(pCapDat = counter; pCapDat <= &counter[buffSize - 1];) {
     // wait for edge or overflow (output compare match)
-    while(!(tifr = (TIFR1 & ((1 << ICF1) | (1 << OCF1A))))) {}
+    while(!(tifr = (TIFR5 & ((1 << ICF5) | (1 << OCF5A))))) {}
 
-    uint16_t val = ICR1;
+    uint16_t val = ICR5;
 
     // Break if counter overflows
-    if(tifr & (1 << OCF1A)) {
+    if(tifr & (1 << OCF5A)) {
       // Ignore overflow at the beginning of capture
       if(pCapDat != counter) {
         break;
       }
     }
 
-    TCCR1B ^= ices1High; // toggle the trigger edge
-    TIFR1 = (1 << ICF1) | (1 << OCF1A); // clear input capture and output compare flag bit
+    TCCR5B ^= ices5High; // toggle the trigger edge
+    TIFR5 = (1 << ICF5) | (1 << OCF5A); // clear input capture and output compare flag bit
 
     *pCapDat = val - prevVal;
 
@@ -249,17 +253,17 @@ void sendDshot300Frame() {
  */
 void sendInvertedDshot300Bit(uint8_t bit) {
   if(bit) {
-    PORTB = B00000000;
+    PORTL = B00000000;
     //DELAY_CYCLES(40);
     DELAY_CYCLES(37);
-    PORTB = B00000001;
+    PORTL = B00000010;
     //DELAY_CYCLES(13);
     DELAY_CYCLES(7);
   } else {
-    PORTB = B00000000;
+    PORTL = B00000000;
     //DELAY_CYCLES(20);
     DELAY_CYCLES(16);
-    PORTB = B00000001;
+    PORTL = B00000010;
     //DELAY_CYCLES(33);
     DELAY_CYCLES(25);
   }
@@ -267,17 +271,17 @@ void sendInvertedDshot300Bit(uint8_t bit) {
 
 void sendDshot300Bit(uint8_t bit) {
   if(bit) {
-    PORTB = B00000001;
+    PORTL = B00000010;
     //DELAY_CYCLES(40);
     DELAY_CYCLES(37);
-    PORTB = B00000000;
+    PORTL = B00000000;
     //DELAY_CYCLES(13);
     DELAY_CYCLES(7);
   } else {
-    PORTB = B00000001;
+    PORTL = B00000010;
     //DELAY_CYCLES(20);
     DELAY_CYCLES(16);
-    PORTB = B00000000;
+    PORTL = B00000000;
     //DELAY_CYCLES(33);
     DELAY_CYCLES(25);
   }
@@ -343,11 +347,12 @@ void dshotSetup() {
 
   pinMode(pinDshot, OUTPUT);
 
+
   // Set the default signal Level
   #if inverted
-    PORTB = B00000001;
+    PORTL = B00000010;
   #else
-    PORTB = B00000000;
+    PORTL = B00000000;
   #endif
 
   #if debug
@@ -372,8 +377,12 @@ void readUpdate() {
   // Serial read might not always trigger properly here since the timer might interrupt
   // Disabling the interrupts is not an option since Serial uses interrupts too.
   if(Serial.available() > 0) {
-    uint16_t dshotValue = Serial.parseInt(SKIP_NONE);
-    Serial.read();
+    String c = Serial.readString();
+    // Serial.println(c);
+    uint16_t dshotValue = c.toInt(); // Serial.parseInt(SKIP_NONE);
+   // Serial.read();
+   // Serial.print("Read: ");
+   // Serial.println(dshotValue);
 
     if(dshotValue > 2047) {
       dshotValue = 2047;
@@ -397,6 +406,9 @@ void readUpdate() {
 }
 
 void printResponse() {
+
+
+
   if(newResponse) {
     newResponse  = false;
 
@@ -405,10 +417,10 @@ void printResponse() {
     uint16_t value = mapped >> 4;
     uint8_t crcExpected = dshot.calculateCrc(value);
 
-    //Serial.println(mapped, BIN);
-    Serial.print(value, BIN);
-    Serial.print(" ");
-    Serial.println(crc, BIN);
+ //   Serial.println(mapped, BIN);
+//    Serial.print(value, BIN);
+//    Serial.print(" ");
+//    Serial.println(crc, BIN);
 
     // Wait for a first valid response
     if(!hasEsc) {
@@ -433,12 +445,24 @@ void printResponse() {
     if((dshotResponse != dshotResponseLast) || !debug) {
       dshotResponseLast = dshotResponse;
 
+
+
       // DShot Frame: EEEMMMMMMMMM
       uint32_t periodBase = value & 0b0000000111111111;
       uint8_t periodShift = value >> 9 & 0b00000111;
       uint32_t periodTime =  periodBase << periodShift;
+      uint32_t eRPM = (1000000 * 60/ 100 + periodTime/2) / periodTime;
+      RPM  = eRPM * 100 / (14 / 2);
 
       uint8_t packageType = value >> 8 & 0b00001111;
+
+    if (oldRPM != RPM) {
+      Serial.print("RPM:" );
+      Serial.println(RPM); 
+    }
+      oldRPM = RPM;
+
+
 
       if(enableEdt) {
         /**
@@ -471,17 +495,70 @@ void printResponse() {
         }
       }
 
+#if debug
       if(crc == crcExpected) {
         Serial.print("OK: ");
       } else {
         Serial.print("--: ");
       }
+#endif
 
       #if debug
         float successPercent = (successPackets * 1.0 / receivedPackets * 1.0) * 100;
       #endif
 
-      Serial.print(periodTime);
+/*
+      uint16_t speed = -1;
+      uint16_t speedBase;
+      if (crc == crcExpected) {
+          if (packageType & 0x01 == 0 and periodShift == 0) {
+             int speed = periodBase;   
+             Serial.println("1111");         
+             } else if (packageType & 0x01 == 1 and periodShift > 0) {
+
+               Serial.println("2222");
+                  speed = periodBase;
+
+                       Serial.print("start speed: ");
+                       Serial.print(speed);    
+                       Serial.print('\t');     
+                       Serial.println(periodShift);             
+                  while (1) {
+                     if (periodShift ==0) {
+                         Serial.println("breaking late");
+                         break;
+                     } 
+                     
+                     if (periodShift & 0x01 == 1) {
+
+                       break;
+                     }  else {
+                       periodShift--;
+                       speed = speed << 1;
+                     }                     
+                  }
+             }
+              
+
+          if (speed > 0) {
+            Serial.print("FINAL Speed: ");
+            Serial.print(speed);
+                       Serial.print('\t');     
+                       Serial.println(periodShift);                
+          } 
+
+          Serial.print(periodBase);
+          Serial.print('\t');
+          Serial.print(periodShift);
+          Serial.print('\t');         
+          Serial.println(periodTime);
+
+
+      }
+
+*/
+
+      // Serial.print(periodTime);
       #if debug
         Serial.print("us ");
         Serial.print(round(successPercent));
@@ -511,9 +588,11 @@ void printResponse() {
 
           Serial.print(" | S: ");
           Serial.print(edtState);
+
+          Serial.println();
         }
       #endif
-      Serial.println();
+
     }
   }
 }
