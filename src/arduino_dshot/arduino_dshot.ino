@@ -2,6 +2,34 @@
 #include "Dshot.h"
 #include "C2.h"
 
+
+/* Program Management - User Input */
+// Program
+// 0 = Stop everything
+// 1 = Pump at 50% for 10 seconds
+int program=0;
+
+
+// Buttons, and everything that goes with it to stop Contact Bounce from occuring.
+const int DEBOUNCE_DELAY = 50;   // the debounce time; increase if the output flickers
+const int programPin = 6;
+const int abortPin=3;
+int programState = LOW;
+int abortState   = LOW;
+unsigned long plastDebounceTime = 0;  // the last time the output pin was toggled
+int plastSteadyState = LOW;
+int plastFlickerableState = LOW;  // the previous flickerable state from the input pin
+unsigned long alastDebounceTime = 0;  // the last time the output pin was toggled
+int alastSteadyState = LOW;
+int alastFlickerableState = LOW;  // the previous flickerable state from the input pin
+int abortAction = 0;
+
+unsigned long programDelay=5000;
+unsigned long last_time;
+
+uint16_t targetRPM = 0;   // Target RPM.
+
+
 /**
  * Update frequencies from 2kHz onwards tend to cause issues in regards
  * to processing the DShot response and will result in actual 3kHz instead.
@@ -22,7 +50,9 @@
  * Even if response processing can be sped up, at the higher frequencies we would
  * still struggle to serial print the results.
  */
-const FREQUENCY frequency = F500;
+
+// How often to issue command to ESC
+const FREQUENCY frequency = F500; 
 
 // Set inverted to true if you want bi-directional DShot
 #define inverted true
@@ -33,7 +63,9 @@ bool enableEdt = false;
 
 
 #if defined(__AVR_ATmega2560__)
-// For MEga Ether 2560, PortA 0-7: i.e. D22-D29
+// Useful resource is https://docs.arduino.cc/hacking/hardware/PinMapping2560
+// Here, we can see that PL1 (second bit), corresponds to D48 pin.
+// For MEga Ether 2560, PortL 0-7: i.e. D49,D48,D47,D46,D45,D44,D43,D42 (yes, reverse order)
 #define DSHOT_PORT PORTL
 #define DSHOT_PIN 48
 #define DPORT_LOW 0
@@ -51,6 +83,7 @@ bool enableEdt = false;
 
 // DSHOT Output and Input pin
 const uint8_t pinDshot = DSHOT_PIN;
+
 
 
 
@@ -157,7 +190,9 @@ volatile uint8_t edtState = 0;
 uint32_t lastPeriodTime = 0;
 
 uint32_t RPM;
-uint32_t oldRPM;   // Used to store old RPM, which is used to reduce printing of RPM (we don't print RPM if it hasn't changed since last time)
+uint32_t oldRPM;
+
+int count = 0;
 
 #define DELAY_CYCLES(n) __builtin_avr_delay_cycles(n)
 
@@ -167,6 +202,19 @@ void sendInvertedDshot300Bit(uint8_t bit);
 void processTelemetryResponse();
 void readUpdate();
 void printResponse();
+void setupUserInterface();
+void loopUserInterface();
+void run_program(uint16_t maxrpm, int run_seconds);
+
+
+void INT0_ISR(void)
+{
+  abortAction=1;
+  targetRPM = 0;
+  program = 0;
+}
+
+
 
 void processTelemetryResponse() {
   // Set to Input in order to process the response - this will be at 3.3V level
@@ -466,13 +514,15 @@ void printResponse() {
       RPM  = eRPM * 100 / (14 / 2);
 
       uint8_t packageType = value >> 8 & 0b00001111;
-
-      if (oldRPM != RPM) {
-         Serial.print("RPM:" );
-         Serial.println(RPM); 
-      }
+    if (oldRPM != RPM) {
+      if (count > 100) {
+        Serial.print("RPM:" );
+        Serial.println(RPM); 
+        count = 0;
+      } 
+    }
       oldRPM = RPM;
-
+    count++;
 
 
       if(enableEdt) {
@@ -567,6 +617,8 @@ void c2Setup() {
 }
 
 void setup() {
+  setupUserInterface();
+
   pinMode(C2_ENABLE_PIN, INPUT_PULLUP);
   c2Mode = !digitalRead(C2_ENABLE_PIN);
 
@@ -583,10 +635,188 @@ void setup() {
   }
 }
 
+
+void setupUserInterface() {
+  pinMode(programPin, INPUT);
+  pinMode(abortPin, INPUT);
+
+  attachInterrupt(digitalPinToInterrupt(abortPin), INT0_ISR, RISING);
+
+  plastDebounceTime = millis();
+  alastDebounceTime = millis();
+}
+
+
+void loopUserInterface() {
+   
+    if (abortAction == 1) {
+        abortAction = 0;
+        Serial.println("Aborting...");
+        return;
+     }
+
+    programState = digitalRead(programPin);
+
+  if (programState != plastFlickerableState) {
+    // reset the debouncing timer
+    plastDebounceTime = millis();
+    // save the the last flickerable state
+    plastFlickerableState = programState;
+  }
+
+
+   if ((millis() - plastDebounceTime) > DEBOUNCE_DELAY) {
+      if (plastSteadyState == HIGH && programState == LOW) {
+        // Serial.println("The button is pressed");
+      }
+      else if (plastSteadyState == LOW && programState == HIGH) {
+        program++;
+        last_time = millis();
+        Serial.print("Program: ");      
+        Serial.println(program);      
+      }
+
+       plastSteadyState = programState;
+   }    
+
+   // Only if a program is selected (>= 1), then we consider timing the start...
+if (program > 0) {
+
+   if (millis() - last_time > programDelay) {
+      if (program == 1) {
+        abortAction = 0;
+        run_program(48,0);
+
+        program = 0;
+
+      }
+
+      if (program == 2) {
+        abortAction = 0;
+        run_program(96,0);
+
+        program = 0;
+
+      }    
+
+      if (program == 3) {
+        abortAction = 0;
+        run_program(144,0);
+
+        program = 0;
+
+      } 
+      if (program == 4) {
+        abortAction = 0;
+        run_program(192,10);
+
+        program = 0;
+
+      } 
+      if (program == 5) {
+        abortAction = 0;
+        run_program(240,10);
+
+        program = 0;
+
+      }   
+      if (program == 6) {
+        abortAction = 0;
+        run_program(288,10);
+
+        program = 0;
+
+      }    
+      if (program == 7) {
+        abortAction = 0;
+        run_program(336,10);
+
+        program = 0;
+
+      }    
+      if (program == 8) {
+        abortAction = 0;
+        run_program(384,10);
+        program = 0;
+
+      }        
+
+      if (program == 9) {
+        abortAction = 0;
+        run_program(432,10);
+
+        program = 0;
+      }        
+      if (program == 10) {
+        abortAction = 0;
+        run_program(480,10);
+
+        program = 0;
+      }                                                                 
+   }
+
+}
+
+}
+
+
+
+void run_program(uint16_t maxrpm, int run_seconds)
+{
+  long start_timer;
+  int i = 0;
+  int previous_second = 0;
+  int current_second;
+  long run_milliseconds = 1000 * run_seconds;
+
+
+  Serial.println("Starting ramp up...");
+  for (i = 0; i < maxrpm; i++) {
+     delay(10);
+     // pwmval = bottom_pwmval+i;
+     // myservo.writeMicroseconds(pwmval);
+
+     if (abortAction == 1) {
+        abortAction = 0;
+        Serial.println("Aborting...");
+        return;
+     }
+  }
+
+  // Leave stepper motor going for 10 seconds
+  Serial.println("Starting 10 seconds...");
+  start_timer = millis();
+  while (millis() - start_timer < run_milliseconds or run_seconds == 0) {
+
+
+     current_second = int((millis() - start_timer) / 1000);
+     previous_second = current_second;
+    
+    if (abortAction == 1) {
+       abortAction = 0;
+       Serial.println("Aborting...");
+       break;
+    }
+
+  }
+
+  // Set Speed back to OFF
+
+/*
+   pwmval = bottom_pwmval;
+   myservo.writeMicroseconds(pwmval);
+   Serial.println(pwmval);
+*/
+
+}
+
+
+
 void loop() {
   if(c2Mode) {
     c2->loop();
   } else {
     dshotLoop();
   }
+  loopUserInterface();
 }
