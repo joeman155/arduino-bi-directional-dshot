@@ -1,30 +1,46 @@
 #include "Arduino.h"
 #include "Dshot.h"
 #include "C2.h"
+#include <PID_v1.h>
+
+
 
 
 /* Program Management - User Input */
 // Program
 // 0 = Stop everything
-// 1 = Pump at 50% for 10 seconds
+// 1 = Pump at 2500RPM; for 10 seconds
 int program=0;
 
 
 // Buttons, and everything that goes with it to stop Contact Bounce from occuring.
-const int DEBOUNCE_DELAY = 50;   // the debounce time; increase if the output flickers
-const int programPin = 6;
-const int abortPin=3;
-int programState = LOW;
+const int DEBOUNCE_DELAY  = 50;   // the debounce time; increase if the output flickers
+const int programPin      = 6;
+const int abortPin        = 3;
+int programState          = LOW;
 unsigned long plastDebounceTime = 0;  // the last time the output pin was toggled
-int plastSteadyState = LOW;
+int plastSteadyState      = LOW;
 int plastFlickerableState = LOW;  // the previous flickerable state from the input pin
-int abortAction = 0;
+int abortAction           = 0;
 
 unsigned long programDelay=5000;
 unsigned long last_time;
 
-uint16_t targetRPM = 0;     // Target RPM.
-uint16_t prevtargetRPM = 0; // Previous target value
+
+// PID settings to allow us to get to the desired speed quickly
+double targetRPM;             // Target RPM                        - PID SetPoint
+double inputRPM;              // The value we set to give us speed - PID INPUT
+double outputValue;           // The dshotvalue to set speed       - PID Output
+double outputValue_ul = 2000; // Upper limit to PID Output
+double outputValue_ll = 100;  // Lower limit to PID Output
+double previousoutputValue;   // Used to detect if there is a change or not.
+
+//Specify the links and initial tuning parameters
+double Kp=0.020015, Ki=0.0500, Kd=0.00000;
+PID myPID(&inputRPM, &outputValue, &targetRPM, Kp, Ki, Kd, DIRECT);
+
+
+
 
 
 /**
@@ -186,8 +202,6 @@ volatile uint8_t edtState = 0;
 
 uint32_t lastPeriodTime = 0;
 
-uint32_t RPM;
-uint32_t oldRPM;
 
 int count = 0;
 
@@ -197,18 +211,20 @@ void sendDshot300Frame();
 void sendDshot300Bit(uint8_t bit);
 void sendInvertedDshot300Bit(uint8_t bit);
 void processTelemetryResponse();
-void speedUpdate(uint16_t targetRPM, int verbose);
+void speedUpdate(double outputValue, int verbose);
+void setSpeed(double speed);
 void printResponse();
 void setupUserInterface();
 void loopUserInterface();
-void run_program(uint16_t maxrpm, int run_seconds);
+void run_program(double rpm, int run_seconds);
+double calculateRPM();
 
 
 void INT0_ISR(void)
 {
   abortAction=1;
   targetRPM = 0;
-  speedUpdate(targetRPM, 0);
+  setSpeed(0);
   program = 0;
 }
 
@@ -431,6 +447,65 @@ void dshotSetup() {
   setupTimer();
 }
 
+
+// Set Speed - irrespective of PID
+void setSpeed(double speed) {
+  uint16_t dshotValue;
+  frame = dshot.buildFrame(dshotValue, 0);
+}
+
+
+
+// Used by PID to update speed
+void speedUpdate(double outputValue, int verbose) {
+  uint16_t dshotValue;
+  dshotValue = int(outputValue);
+
+
+
+  // Only if target RPM has changed, do we process it and generate a new frame.
+  if (outputValue != previousoutputValue)  {
+      previousoutputValue = outputValue;
+
+     // Implement lower bounds.
+     if (dshotValue < outputValue_ll and dshotValue > 0) {
+        dshotValue = outputValue_ll;
+     }
+    
+    if (dshotValue < 0) {
+       dshotValue = 0;
+    }
+
+     // Implement upper bounds.
+     if(dshotValue > outputValue_ul) {
+        Serial.print("Too fast: ");
+        dshotValue = outputValue_ul;
+     }
+
+
+
+/*
+     if (dshotValue > 1500) {
+       Serial.print("Too fast: ");
+       Serial.println(dshotValue);
+       dshotValue = 1500;
+     } 
+*/
+
+    frame = dshot.buildFrame(dshotValue, 0);
+
+    if (verbose == 1) {
+       Serial.print("> Frame: ");
+       Serial.print(frame, BIN);
+       Serial.print(" Value: ");
+       Serial.println(dshotValue);
+    }
+  }
+}
+
+
+
+/*
 void speedUpdate(uint16_t targetRPM, int verbose) {
   uint16_t dshotValue;
 
@@ -457,11 +532,12 @@ void speedUpdate(uint16_t targetRPM, int verbose) {
     }
   }
 }
+*/
 
 
 
-
-void printResponse() {
+double calculateRPM() {
+  double RPM = -1;
   if(newResponse) {
     newResponse  = false;
 
@@ -479,125 +555,21 @@ void printResponse() {
       return;
     }
 
-    // Calculate success rate - percentage of packeges on which CRC matched the value
-    receivedPackets++;
-    if(crc == crcExpected) {
-      successPackets++;
-    }
 
-    // Reset packet count if overflows
-    if(!receivedPackets) {
-      successPackets = 0;
-    }
-
-    if((dshotResponse != dshotResponseLast) || !debug) {
-      dshotResponseLast = dshotResponse;
-
-
-
-      // DShot Frame: EEEMMMMMMMMM
-      uint32_t periodBase = value & 0b0000000111111111;
-      uint8_t periodShift = value >> 9 & 0b00000111;
-      uint32_t periodTime =  periodBase << periodShift;
-      uint32_t eRPM = (1000000 * 60/ 100 + periodTime/2) / periodTime;
-      RPM  = eRPM * 100 / (14 / 2);
-
-      uint8_t packageType = value >> 8 & 0b00001111;
-    if (oldRPM != RPM) {
-      if (count > 100) {
-        Serial.print("RPM:" );
-        Serial.println(RPM); 
-        count = 0;
-      } 
-    }
-      oldRPM = RPM;
-    count++;
-
-
-      if(enableEdt) {
-        /**
-         * Extended DShot Frame: PPPEMMMMMMMM
-         *
-         * In extended Dshot the first bit after after
-         * the exponent indicated if it is telemetry
-         *
-         * A 0 bit indicates telemetry, in this case
-         * the exponent maps to a certain type of telemetry.
-         *
-         * A telemetry package only happens every n packages
-         * and it does not include ERPM data, it is assumed
-         * that the previous ERPM value is still valid.
-         */
-        if((packageType & 0x01) == 0) {
-          switch(packageType) {
-            case 0x02: edtTemperature = periodBase; break;
-            case 0x04: edtVoltage = periodBase; break;
-            case 0x06: edtCurrent = periodBase; break;
-            case 0x08: edtDebug1 = periodBase; break;
-            case 0x0A: edtDebug2 = periodBase; break;
-            case 0x0C: edtDebug3 = periodBase; break;
-            case 0x0E: edtState = periodBase; break;
-          }
-
-          periodTime = lastPeriodTime;
-        } else {
-          lastPeriodTime = periodTime;
-        }
-      }
-
-#if debug
-      if(crc == crcExpected) {
-        Serial.print("OK: ");
-      } else {
-        Serial.print("--: ");
-      }
-#endif
-
-      #if debug
-        float successPercent = (successPackets * 1.0 / receivedPackets * 1.0) * 100;
-      #endif
-
-      #if debug
-        Serial.print("us ");
-        Serial.print(round(successPercent));
-        Serial.print("%");
-
-        if(enableEdt) {
-          Serial.print(" EDT: ");
-          Serial.print(edtTemperature);
-          Serial.print("°C");
-
-          Serial.print(" | ");
-          Serial.print(edtVoltage * 0.25);
-          Serial.print("V");
-
-          Serial.print(" | ");
-          Serial.print(edtCurrent);
-          Serial.print("A");
-
-          Serial.print(" | D1: ");
-          Serial.print(edtDebug1);
-
-          Serial.print(" | D2: ");
-          Serial.print(edtDebug2);
-
-          Serial.print(" | D3: ");
-          Serial.print(edtDebug3);
-
-          Serial.print(" | S: ");
-          Serial.print(edtState);
-
-          Serial.println();
-        }
-      #endif
-
-    }
+    // DShot Frame: EEEMMMMMMMMM
+    uint32_t periodBase = value & 0b0000000111111111;
+    uint8_t periodShift = value >> 9 & 0b00000111;
+    uint32_t periodTime =  periodBase << periodShift;
+    uint32_t eRPM = (1000000 * 60/ 100 + periodTime/2) / periodTime;
+    RPM  = eRPM * 100 / (14 / 2);
   }
+
+    return RPM;
 }
 
-void dshotLoop() {
-  printResponse();
-}
+
+
+
 
 void c2Setup() {
   c2 = new C2(&C2_PORT, &C2_DDR, &C2_PIN, (uint8_t) C2CK_PIN, (uint8_t) C2D_PIN, (uint8_t) LED_BUILTIN);
@@ -606,6 +578,13 @@ void c2Setup() {
 
 void setup() {
   setupUserInterface();
+
+  //turn the PID on
+  myPID.SetMode(AUTOMATIC);
+  myPID.SetOutputLimits(outputValue_ll, outputValue_ul);
+
+  // Set beginning speed - to make it active/ready.
+  setSpeed(0);
 
   pinMode(C2_ENABLE_PIN, INPUT_PULLUP);
   c2Mode = !digitalRead(C2_ENABLE_PIN);
@@ -672,61 +651,61 @@ if (program > 0) {
    if (millis() - last_time > programDelay) {
       if (program == 1) {
         abortAction = 0;
-        run_program(250, 0);
+        run_program(2500, 10);
         program = 0;
       }
 
       if (program == 2) {
         abortAction = 0;
-        run_program(5000, 0);
+        run_program(5000, 10);
         program = 0;
       }    
 
       if (program == 3) {
         abortAction = 0;
-        run_program(10000, 0);
+        run_program(10000, 10);
         program = 0;
       } 
 
       if (program == 4) {
         abortAction = 0;
-        run_program(192, 10);
+        run_program(15000, 10);
         program = 0;
       } 
 
       if (program == 5) {
         abortAction = 0;
-        run_program(240, 10);
+        run_program(20000, 10);
         program = 0;
       }  
 
       if (program == 6) {
         abortAction = 0;
-        run_program(288, 10);
+        run_program(25000, 10);
         program = 0;
       }    
 
       if (program == 7) {
         abortAction = 0;
-        run_program(336, 10);
+        run_program(30000, 10);
         program = 0;
       }    
 
       if (program == 8) {
         abortAction = 0;
-        run_program(384, 10);
+        run_program(35000, 10);
         program = 0;
       }        
 
       if (program == 9) {
         abortAction = 0;
-        run_program(432, 10);
+        run_program(40000, 10);
         program = 0;
       } 
 
       if (program == 10) {
         abortAction = 0;
-        run_program(480, 10);
+        run_program(45000, 10);
         program = 0;
       }  
 
@@ -738,17 +717,59 @@ if (program > 0) {
 
 
 
-void run_program(uint16_t maxrpm, int run_seconds)
+void run_program(double rpm, int run_seconds)
 {
   long start_timer;
-  int i = 0;
-  int previous_second = 0;
-  int current_second;
   long run_milliseconds = 1000 * run_seconds;
 
+  // Set the SetPoint
+  targetRPM = rpm;
+  outputValue = 0;
+     
+  Serial.print("targetRPM: ");
+  Serial.print('\t');
+  Serial.println(targetRPM);
 
+  // We give us run_seconds to get this working.... 
+  start_timer = millis();
+  while (millis() - start_timer < run_milliseconds or run_seconds == 0) {
+     //delay(20);
+
+     // Get current RPM (the INPUT for PID)
+     inputRPM = calculateRPM();
+
+     //Serial.print("Rpm: ");
+     //Serial.println(inputRPM);
+
+     if (inputRPM > 0) {
+        // Re-compute, but only if we have inputRPM
+        myPID.Compute();
+     } else {
+       outputValue = previousoutputValue;
+     }
+
+     Serial.print("outputValue, RPM: ");
+     Serial.print('\t');
+     Serial.print(outputValue);
+     Serial.print('\t');
+     Serial.println(inputRPM);
+
+     // Update system with Output
+     speedUpdate(outputValue, 0);
+
+
+     if (abortAction == 1) {
+        abortAction = 0;
+        Serial.println("Aborting...");
+        break;
+     }     
+
+  }
+
+
+/*
   Serial.println("Starting ramp up...");
-  for (i = 230; i < maxrpm; i++) {
+  for (i = 230; i < maxrpm; i=i+10) {
      delay(10);
      targetRPM = i;
      speedUpdate(targetRPM, 0);
@@ -777,22 +798,21 @@ void run_program(uint16_t maxrpm, int run_seconds)
        break;
     }
 
+    
+
   }
 
   // Set Speed back to OFF
   targetRPM = 0;
   speedUpdate(targetRPM, 0);
   printResponse();
+  */
+
 
 }
 
 
 
 void loop() {
-  if(c2Mode) {
-    c2->loop();
-  } else {
-    dshotLoop();
-  }
   loopUserInterface();
 }
