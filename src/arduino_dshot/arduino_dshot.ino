@@ -1,3 +1,27 @@
+/*
+ *  Name: arduino_dshot
+ *  Author: Joseph Turner
+ *  Date:   16-JUN-2023
+ *  Purpose: Control Drone motor speed using PID.
+ *
+ *
+ *  How it works
+ *  > We use a bit-banging to send commands to ESC using bi-direction dShot.
+ *  > We receive the period (microseconds) for each impulse received by ESC and convert this to RPM
+ *  > We have some buttons (PGM BUTTON) and (ABORT BUTTON) which are used to set a program to select a desired speed.
+ *  > The run_program routine uses PID to get to the target RPM as quickly as possible and as smoothly as possible.
+ *
+ *  The PGM BUTTON uses nifty code to remove contact bounce. The user presses it to advance the program #. NOTE, the program 
+ *  is not executed until 5 seconds has passed since being pushed
+ *
+ *  The ABORT BUTTON is detected via an interrupt, so can interrupt the operation of the motor at anytime. Immediately.
+ *
+ *  Acknowledgements: Would not have got anywhere without the code developed at https://github.com/bird-sanctuary/arduino-bi-directional-dsho
+ *
+*/
+
+
+
 #include "Arduino.h"
 #include "Dshot.h"
 #include "C2.h"
@@ -10,6 +34,8 @@
 // Program
 // 0 = Stop everything
 // 1 = Pump at 2500RPM; for 10 seconds
+// 2 = Pump at 5000 RPM; for 10 seconds
+// and so on...
 int program=0;
 
 
@@ -73,8 +99,7 @@ const FREQUENCY frequency = F500;
 // Enable Extended Dshot Telemetry
 bool enableEdt = false;
 
-
-
+// Depending upon the hardware, set the pins to use.
 #if defined(__AVR_ATmega2560__)
 // Useful resource is https://docs.arduino.cc/hacking/hardware/PinMapping2560
 // Here, we can see that PL1 (second bit), corresponds to D48 pin.
@@ -96,7 +121,6 @@ bool enableEdt = false;
 
 // DSHOT Output and Input pin
 const uint8_t pinDshot = DSHOT_PIN;
-
 
 
 
@@ -203,7 +227,6 @@ volatile uint8_t edtState = 0;
 uint32_t lastPeriodTime = 0;
 
 
-int count = 0;
 
 #define DELAY_CYCLES(n) __builtin_avr_delay_cycles(n)
 
@@ -213,11 +236,11 @@ void sendInvertedDshot300Bit(uint8_t bit);
 void processTelemetryResponse();
 void speedUpdate(double outputValue, int verbose);
 void setSpeed(double speed);
-void printResponse();
 void setupUserInterface();
 void loopUserInterface();
 void run_program(double rpm, int run_seconds);
 double calculateRPM();
+void resetPID();
 
 
 void INT0_ISR(void)
@@ -226,8 +249,9 @@ void INT0_ISR(void)
   targetRPM = 0;
   setSpeed(0);
   program = 0;
-}
 
+  resetPID();
+}
 
 
 void processTelemetryResponse() {
@@ -444,6 +468,7 @@ void dshotSetup() {
     }
   #endif
 
+  // Set up timer to periodically send commands down line (dShot) to spin the drone motor.
   setupTimer();
 }
 
@@ -483,15 +508,6 @@ void speedUpdate(double outputValue, int verbose) {
      }
 
 
-
-/*
-     if (dshotValue > 1500) {
-       Serial.print("Too fast: ");
-       Serial.println(dshotValue);
-       dshotValue = 1500;
-     } 
-*/
-
     frame = dshot.buildFrame(dshotValue, 0);
 
     if (verbose == 1) {
@@ -505,34 +521,7 @@ void speedUpdate(double outputValue, int verbose) {
 
 
 
-/*
-void speedUpdate(uint16_t targetRPM, int verbose) {
-  uint16_t dshotValue;
 
-  // Only if target RPM has changed, do we process it and generate a new frame.
-  if (prevtargetRPM != targetRPM)  {
-      prevtargetRPM = targetRPM;
-
-     if (targetRPM != 0) {
-        dshotValue = map(targetRPM, 230, 50000, 100, 2000);
-     } else  {
-        dshotValue = 0;
-     }
-
-    if(dshotValue > 2000) {
-      dshotValue = 2000;
-    }
-    frame = dshot.buildFrame(dshotValue, 0);
-
-    if (verbose == 1) {
-       Serial.print("> Frame: ");
-       Serial.print(frame, BIN);
-       Serial.print(" Value: ");
-       Serial.println(dshotValue);
-    }
-  }
-}
-*/
 
 
 
@@ -552,9 +541,8 @@ double calculateRPM() {
         hasEsc = true;
       }
 
-      return;
+      return RPM;
     }
-
 
     // DShot Frame: EEEMMMMMMMMM
     uint32_t periodBase = value & 0b0000000111111111;
@@ -564,12 +552,16 @@ double calculateRPM() {
     RPM  = eRPM * 100 / (14 / 2);
   }
 
-    return RPM;
+  return RPM;
 }
 
 
 
-
+void resetPID() {
+  myPID.SetOutputLimits(0.0, 1.0);  // Forces minimum up to 0.0
+  myPID.SetOutputLimits(-1.0, 0.0);  // Forces maximum down to 0.0
+  myPID.SetOutputLimits(outputValue_ll, outputValue_ul);  // Set the limits back to normal
+}
 
 void c2Setup() {
   c2 = new C2(&C2_PORT, &C2_DDR, &C2_PIN, (uint8_t) C2CK_PIN, (uint8_t) C2D_PIN, (uint8_t) LED_BUILTIN);
@@ -646,72 +638,72 @@ void loopUserInterface() {
    }    
 
    // Only if a program is selected (>= 1), then we consider timing the start...
-if (program > 0) {
+   if (program > 0) {
 
-   if (millis() - last_time > programDelay) {
-      if (program == 1) {
-        abortAction = 0;
-        run_program(2500, 10);
-        program = 0;
+      if (millis() - last_time > programDelay) {
+         if (program == 1) {
+           abortAction = 0;
+           run_program(2500, 10);
+           program = 0;
+         }
+
+         if (program == 2) {
+           abortAction = 0;
+           run_program(5000, 10);
+           program = 0;
+         }    
+
+         if (program == 3) {
+           abortAction = 0;
+           run_program(10000, 10);
+           program = 0;
+         } 
+
+         if (program == 4) {
+           abortAction = 0;
+           run_program(15000, 10);
+           program = 0;
+         } 
+
+         if (program == 5) {
+           abortAction = 0;
+           run_program(20000, 10);
+           program = 0;
+         }  
+
+         if (program == 6) {
+           abortAction = 0;
+           run_program(25000, 10);
+           program = 0;
+         }    
+
+         if (program == 7) {
+           abortAction = 0;
+           run_program(30000, 10);
+           program = 0;
+         }    
+
+         if (program == 8) {
+           abortAction = 0;
+           run_program(35000, 10);
+           program = 0;
+         }        
+
+         if (program == 9) {
+           abortAction = 0;
+           run_program(40000, 10);
+           program = 0;
+         } 
+
+         if (program == 10) {
+           abortAction = 0;
+           run_program(45000, 10);
+           program = 0;
+         }  
+
       }
 
-      if (program == 2) {
-        abortAction = 0;
-        run_program(5000, 10);
-        program = 0;
-      }    
-
-      if (program == 3) {
-        abortAction = 0;
-        run_program(10000, 10);
-        program = 0;
-      } 
-
-      if (program == 4) {
-        abortAction = 0;
-        run_program(15000, 10);
-        program = 0;
-      } 
-
-      if (program == 5) {
-        abortAction = 0;
-        run_program(20000, 10);
-        program = 0;
-      }  
-
-      if (program == 6) {
-        abortAction = 0;
-        run_program(25000, 10);
-        program = 0;
-      }    
-
-      if (program == 7) {
-        abortAction = 0;
-        run_program(30000, 10);
-        program = 0;
-      }    
-
-      if (program == 8) {
-        abortAction = 0;
-        run_program(35000, 10);
-        program = 0;
-      }        
-
-      if (program == 9) {
-        abortAction = 0;
-        run_program(40000, 10);
-        program = 0;
-      } 
-
-      if (program == 10) {
-        abortAction = 0;
-        run_program(45000, 10);
-        program = 0;
-      }  
-
    }
-
-}
 
 }
 
@@ -738,10 +730,8 @@ void run_program(double rpm, int run_seconds)
      // Get current RPM (the INPUT for PID)
      inputRPM = calculateRPM();
 
-     //Serial.print("Rpm: ");
-     //Serial.println(inputRPM);
 
-     if (inputRPM > 0) {
+     if (inputRPM >= 0) {
         // Re-compute, but only if we have inputRPM
         myPID.Compute();
      } else {
@@ -765,49 +755,6 @@ void run_program(double rpm, int run_seconds)
      }     
 
   }
-
-
-/*
-  Serial.println("Starting ramp up...");
-  for (i = 230; i < maxrpm; i=i+10) {
-     delay(10);
-     targetRPM = i;
-     speedUpdate(targetRPM, 0);
-
-     printResponse();
-     if (abortAction == 1) {
-        abortAction = 0;
-        Serial.println("Aborting...");
-        return;
-     }
-  }
-
-  // Leave stepper motor going for 10 seconds
-  Serial.println("Starting 10 seconds...");
-  start_timer = millis();
-  while (millis() - start_timer < run_milliseconds or run_seconds == 0) {
-
-
-     current_second = int((millis() - start_timer) / 1000);
-     previous_second = current_second;
-     printResponse();
-
-    if (abortAction == 1) {
-       abortAction = 0;
-       Serial.println("Aborting...");
-       break;
-    }
-
-    
-
-  }
-
-  // Set Speed back to OFF
-  targetRPM = 0;
-  speedUpdate(targetRPM, 0);
-  printResponse();
-  */
-
 
 }
 
