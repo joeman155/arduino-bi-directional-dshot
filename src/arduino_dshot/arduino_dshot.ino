@@ -62,7 +62,8 @@ double outputValue_ll = 100;  // Lower limit to PID Output
 double previousoutputValue;   // Used to detect if there is a change or not.
 
 //Specify the links and initial tuning parameters
-double Kp=0.020015, Ki=0.0500, Kd=0.00000;
+// double Kp=0.020015, Ki=0.0500, Kd=0.00000;   // Original settings, not fantastic, as there is some oscillation early on.
+double Kp=0.0125, Ki=0.25, Kd=0.00001;          // Good settings
 PID myPID(&inputRPM, &outputValue, &targetRPM, Kp, Ki, Kd, DIRECT);
 
 
@@ -443,6 +444,12 @@ void dshotSetup() {
   Serial.begin(115200);
   while(!Serial);
 
+  Serial.println("Starting...");
+  Serial.println("");
+  Serial.println("");
+  Serial.println("");
+  Serial.println("");  
+
   pinMode(pinDshot, OUTPUT);
 
 
@@ -738,10 +745,12 @@ void run_program(double rpm, int run_seconds)
        outputValue = previousoutputValue;
      }
 
-     Serial.print("outputValue, RPM: ");
+     Serial.print("outputValue, Target RPM, Actual RPM: ");
      Serial.print('\t');
      Serial.print(outputValue);
      Serial.print('\t');
+     Serial.print(targetRPM);
+     Serial.print('\t');     
      Serial.println(inputRPM);
 
      // Update system with Output
